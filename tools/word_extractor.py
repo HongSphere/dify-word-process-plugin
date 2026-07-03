@@ -23,7 +23,14 @@ class WordExtractorTool(Tool):
     _CLX_FC_INDEX = 33
     _BLIP_REC_TYPES = set(range(0xF018, 0xF030))
 
-    def _invoke(self, tool_parameters: dict[str, Any]) -> Generator[ToolInvokeMessage, None, None]:
+    def _invoke(
+        self,
+        tool_parameters: dict[str, Any],
+        user_id: str | None = None,
+        conversation_id: str | None = None,
+        app_id: str | None = None,
+        message_id: str | None = None,
+    ) -> Generator[ToolInvokeMessage, None, None]:
         input_file = tool_parameters.get("word_content")
         if not isinstance(input_file, File):
             raise ValueError("Missing or invalid parameter 'word_content' (expected Dify file).")
@@ -507,13 +514,9 @@ class WordExtractorTool(Tool):
     def _carve_all_tiffs(self, data: bytes) -> list[bytes]:
         out: list[bytes] = []
         for sig in (b"II*\x00", b"MM\x00*"):
-            cursor = 0
-            while True:
-                start = data.find(sig, cursor)
-                if start < 0:
-                    break
+            start = data.find(sig)
+            if start >= 0:
                 out.append(data[start:])
-                cursor = start + 4
         return out
 
     def _carve_jpeg(self, data: bytes) -> bytes | None:
