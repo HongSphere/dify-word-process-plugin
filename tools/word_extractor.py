@@ -399,10 +399,33 @@ class WordExtractorTool(Tool):
         return out
 
     def _extract_image_from_payload(self, payload: bytes, rec_type: int) -> dict[str, Any] | None:
+        # 1. Prioritize format according to OfficeArt BLIP record type
+        if rec_type == 0xF01D:  # msofbtBlipJPEG
+            jpeg = self._carve_jpeg(payload)
+            if jpeg:
+                return {"data": jpeg, "mime_type": "image/jpeg", "extension": "jpg"}
+        elif rec_type == 0xF01E:  # msofbtBlipPNG
+            png = self._carve_png(payload)
+            if png:
+                return {"data": png, "mime_type": "image/png", "extension": "png"}
+        elif rec_type == 0xF01F:  # msofbtBlipDIB
+            dib = self._extract_dib(payload)
+            if dib:
+                return {"data": dib, "mime_type": "image/bmp", "extension": "bmp"}
+            bmp = self._carve_bmp(payload)
+            if bmp:
+                return {"data": bmp, "mime_type": "image/bmp", "extension": "bmp"}
+        elif rec_type == 0xF029:  # msofbtBlipTIFF
+            tiff = self._carve_tiff(payload)
+            if tiff:
+                return {"data": tiff, "mime_type": "image/tiff", "extension": "tiff"}
+
+        # 2. General probe: pick format with the earliest signature offset in the payload
         magic_image = self._find_single_image(payload)
         if magic_image:
             return magic_image
 
+        # 3. Fallback DIB extraction for uncompressed bitmap types
         if rec_type in {0xF01E, 0xF01F, 0xF029}:
             dib = self._extract_dib(payload)
             if dib:
@@ -415,27 +438,46 @@ class WordExtractorTool(Tool):
         return None
 
     def _find_single_image(self, payload: bytes) -> dict[str, Any] | None:
-        jpeg = self._carve_jpeg(payload)
-        if jpeg:
-            return {"data": jpeg, "mime_type": "image/jpeg", "extension": "jpg"}
+        candidates: list[tuple[int, dict[str, Any]]] = []
 
-        png = self._carve_png(payload)
-        if png:
-            return {"data": png, "mime_type": "image/png", "extension": "png"}
+        j_start = payload.find(b"\xFF\xD8\xFF")
+        if j_start >= 0:
+            jpeg = self._carve_jpeg(payload[j_start:])
+            if jpeg:
+                candidates.append((j_start, {"data": jpeg, "mime_type": "image/jpeg", "extension": "jpg"}))
 
-        gif = self._carve_gif(payload)
-        if gif:
-            return {"data": gif, "mime_type": "image/gif", "extension": "gif"}
+        p_start = payload.find(b"\x89PNG\r\n\x1a\n")
+        if p_start >= 0:
+            png = self._carve_png(payload[p_start:])
+            if png:
+                candidates.append((p_start, {"data": png, "mime_type": "image/png", "extension": "png"}))
 
-        bmp = self._carve_bmp(payload)
-        if bmp:
-            return {"data": bmp, "mime_type": "image/bmp", "extension": "bmp"}
+        g_start = payload.find(b"GIF8")
+        if g_start >= 0:
+            gif = self._carve_gif(payload[g_start:])
+            if gif:
+                candidates.append((g_start, {"data": gif, "mime_type": "image/gif", "extension": "gif"}))
 
-        tiff = self._carve_tiff(payload)
-        if tiff:
-            return {"data": tiff, "mime_type": "image/tiff", "extension": "tiff"}
+        b_start = payload.find(b"BM")
+        if b_start >= 0:
+            bmp = self._carve_bmp(payload[b_start:])
+            if bmp:
+                candidates.append((b_start, {"data": bmp, "mime_type": "image/bmp", "extension": "bmp"}))
 
-        return None
+        for sig in (b"II*\x00", b"MM\x00*"):
+            t_start = payload.find(sig)
+            if t_start >= 0:
+                tiff = self._carve_tiff(payload[t_start:])
+                if tiff:
+                    candidates.append((t_start, {"data": tiff, "mime_type": "image/tiff", "extension": "tiff"}))
+                break
+
+        if not candidates:
+            return None
+
+        # Prioritize candidate with earliest offset in payload (closest to BLIP header)
+        candidates.sort(key=lambda x: x[0])
+        return candidates[0][1]
 
     def _signature_scan_images(self, data: bytes) -> list[dict[str, Any]]:
         images: list[dict[str, Any]] = []
