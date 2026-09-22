@@ -565,8 +565,8 @@ class WordExtractorTool(Tool):
         start = data.find(b"\xFF\xD8\xFF")
         if start < 0:
             return None
-        end = data.find(b"\xFF\xD9", start + 3)
-        if end < 0:
+        end = data.rfind(b"\xFF\xD9")
+        if end < 0 or end <= start:
             return None
         return data[start : end + 2]
 
