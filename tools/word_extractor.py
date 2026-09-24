@@ -12,6 +12,7 @@ from typing import Any
 import docx2txt
 import olefile
 import zipfile
+import zlib
 from dify_plugin import Tool
 from dify_plugin.entities.tool import ToolInvokeMessage
 from dify_plugin.file.file import File
@@ -189,10 +190,10 @@ class WordExtractorTool(Tool):
 
             candidate_streams = {
                 "WordDocument": word_stream,
-                table_name: table_stream,
             }
             if ole.exists("Data"):
                 candidate_streams["Data"] = ole.openstream("Data").read()
+            candidate_streams[table_name] = table_stream
 
             images = self._extract_images(candidate_streams)
 
@@ -359,6 +360,8 @@ class WordExtractorTool(Tool):
 
         for stream_name, stream_data in streams.items():
             for image in self._extract_officeart_blips(stream_data):
+                if not self._is_valid_image(image["data"], image.get("extension", "")):
+                    continue
                 digest = hashlib.sha1(image["data"]).hexdigest()
                 if digest in seen:
                     continue
@@ -371,6 +374,8 @@ class WordExtractorTool(Tool):
 
         for stream_name, stream_data in streams.items():
             for image in self._signature_scan_images(stream_data):
+                if not self._is_valid_image(image["data"], image.get("extension", "")):
+                    continue
                 digest = hashlib.sha1(image["data"]).hexdigest()
                 if digest in seen:
                     continue
@@ -379,6 +384,77 @@ class WordExtractorTool(Tool):
                 images.append(image)
 
         return {"items": images, "strategy": "signature_fallback" if images else "none"}
+
+    def _is_valid_image(self, data: bytes, ext: str) -> bool:
+        ext = ext.lower().lstrip(".")
+        if ext == "png":
+            return self._is_valid_png(data)
+        elif ext in ("jpg", "jpeg"):
+            return self._is_valid_jpeg(data)
+        elif ext == "bmp":
+            return len(data) >= 54 and data.startswith(b"BM")
+        elif ext == "gif":
+            return len(data) >= 10 and data[:4] == b"GIF8" and data.endswith(b"\x3B")
+        elif ext in ("tif", "tiff"):
+            return len(data) >= 8 and (data.startswith(b"II*\x00") or data.startswith(b"MM\x00*"))
+        return len(data) > 0
+
+    def _is_valid_png(self, data: bytes) -> bool:
+        if len(data) < 33 or not data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return False
+        pos = 8
+        has_idat = False
+        has_iend = False
+        data_len = len(data)
+        while pos + 12 <= data_len:
+            chunk_len = struct.unpack_from(">I", data, pos)[0]
+            if pos + 12 + chunk_len > data_len:
+                return False
+            chunk_type = data[pos+4 : pos+8]
+            crc = struct.unpack_from(">I", data, pos+8+chunk_len)[0]
+            calc_crc = zlib.crc32(data[pos+4 : pos+8+chunk_len]) & 0xFFFFFFFF
+            if calc_crc != crc:
+                return False
+            if chunk_type == b"IDAT":
+                has_idat = True
+            elif chunk_type == b"IEND":
+                has_iend = True
+                break
+            pos += 12 + chunk_len
+        return has_idat and has_iend
+
+    def _is_valid_jpeg(self, data: bytes) -> bool:
+        if len(data) < 100 or not data.startswith(b"\xFF\xD8") or not data.endswith(b"\xFF\xD9"):
+            return False
+        pos = 2
+        data_len = len(data)
+        has_sof = False
+        while pos < data_len:
+            if data[pos] != 0xFF:
+                pos += 1
+                continue
+            while pos < data_len and data[pos] == 0xFF:
+                pos += 1
+            if pos >= data_len:
+                break
+            marker = data[pos]
+            pos += 1
+            if marker in (0xD8, 0xD9, 0x00, 0x01) or (0xD0 <= marker <= 0xD7):
+                continue
+            if pos + 2 > data_len:
+                break
+            seg_len = struct.unpack_from(">H", data, pos)[0]
+            if seg_len < 2 or pos + seg_len > data_len:
+                return False
+            if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                if seg_len >= 7:
+                    h, w = struct.unpack_from(">HH", data, pos + 3)
+                    if h > 0 and w > 0:
+                        has_sof = True
+            elif marker == 0xDA:  # Start of Scan, compressed data follows
+                break
+            pos += seg_len
+        return has_sof
 
     def _extract_officeart_blips(self, data: bytes) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
