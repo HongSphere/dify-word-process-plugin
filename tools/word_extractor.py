@@ -6,6 +6,7 @@ import os
 import re
 import struct
 import tempfile
+import xml.etree.ElementTree as ET
 from collections.abc import Generator
 from typing import Any
 
@@ -98,7 +99,11 @@ class WordExtractorTool(Tool):
                 temp_dir = tempfile.mkdtemp()
                 try:
                     # Extract text and images
-                    text = docx2txt.process(temp_file_path, temp_dir)
+                    try:
+                        text = docx2txt.process(temp_file_path, temp_dir)
+                    except ET.ParseError:
+                        sanitized_blob = self._sanitize_docx_xml_namespaces(blob)
+                        text = docx2txt.process(io.BytesIO(sanitized_blob), temp_dir)
                     yield self.create_text_message(text)
 
                     # Check if any images were extracted
@@ -165,6 +170,51 @@ class WordExtractorTool(Tool):
             raise ValueError(f"Invalid value encountered: {str(e)}")
         except Exception as e:
             raise Exception(f"Error extracting from Word document: {str(e)}")
+
+    def _sanitize_docx_xml_namespaces(self, blob: bytes) -> bytes:
+        """Inject missing xmlns declarations into docx XML files that fail with unbound prefix."""
+        out_buf = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(blob), "r") as zin, zipfile.ZipFile(
+            out_buf, "w", compression=zipfile.ZIP_DEFLATED
+        ) as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename == "word/document.xml" or re.match(
+                    r"word/(header|footer)[0-9]*\.xml$", item.filename
+                ):
+                    try:
+                        ET.fromstring(data)
+                    except ET.ParseError:
+                        xml_text = data.decode("utf-8", errors="replace")
+                        data = self._inject_missing_xmlns(xml_text).encode("utf-8")
+                zout.writestr(item.filename, data)
+        return out_buf.getvalue()
+
+    @staticmethod
+    def _inject_missing_xmlns(xml_text: str) -> str:
+        """Add fallback xmlns:<prefix> attributes to the root element for undeclared prefixes."""
+        # Match the first non-PI/non-comment/non-doctype opening tag (the XML root element)
+        root_match = re.search(r"<(?![?!])([A-Za-z_][\w.-]*(?::[A-Za-z_][\w.-]*)?)([^>]*?)(/?)>", xml_text)
+        if not root_match:
+            return xml_text
+
+        declared = set(re.findall(r'xmlns:([A-Za-z_][\w.-]*)\s*=', root_match.group(2)))
+        declared.add("xml")
+
+        tag_prefixes = re.findall(r"</?([A-Za-z_][\w.-]*):[A-Za-z_][\w.-]*", xml_text)
+        attr_prefixes = re.findall(r"\s([A-Za-z_][\w.-]*):[A-Za-z_][\w.-]*\s*=", xml_text)
+
+        missing = [
+            p
+            for p in dict.fromkeys(tag_prefixes + attr_prefixes)
+            if p != "xmlns" and p not in declared
+        ]
+        if not missing:
+            return xml_text
+
+        ns_attrs = "".join(f' xmlns:{p}="urn:ooxml-fallback:{p}"' for p in missing)
+        insert_pos = root_match.start(3)
+        return xml_text[:insert_pos] + ns_attrs + xml_text[insert_pos:]
 
     def _extract_doc(self, blob: bytes) -> dict[str, Any]:
         if not olefile.isOleFile(io.BytesIO(blob)):
