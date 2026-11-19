@@ -1,0 +1,14 @@
+tools/word_extractor.py
+  h_b8a5bec9fccfca 9,102-106,174-218
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "332840c2b0ece4d0284c2e74e3a8412672edb8d0",
+  "prompts": {},
+  "humans": {
+    "h_b8a5bec9fccfca": {
+      "author": "zhanghong <zhanghong@meibaokeji.com>"
+    }
+  }
+}
